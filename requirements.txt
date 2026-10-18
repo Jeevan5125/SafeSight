@@ -1,0 +1,16 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# CPU-only PyTorch
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+
+# Keep NumPy compatible with the pinned PyTorch version
+numpy==1.26.4
+
+# Match the Ultralytics version used to train the YOLO11 checkpoint
+ultralytics==8.4.179
+
+opencv-python>=4.8,<6
+cvzone>=1.6
+Flask>=2.3,<4
+Flask-WTF>=1.2,<2

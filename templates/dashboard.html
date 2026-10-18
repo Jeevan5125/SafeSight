@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b1013">
+  <title>Site dashboard | SafeSight</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <div class="topbar">
+    <nav class="shell nav" aria-label="Main navigation">
+      <a class="brand" href="{{ url_for('home') }}"><span class="brand-mark">S</span> SafeSight <span style="color:var(--muted);font-weight:500">/ Site dashboard</span></a>
+      <div class="nav-links">
+        <a href="{{ url_for('home') }}">Overview</a>
+        <a href="{{ url_for('safety_monitor_page') }}">Safety monitor</a>
+        <a class="active" href="{{ url_for('safety_dashboard') }}">Live dashboard</a>
+      </div>
+    </nav>
+  </div>
+
+  <main class="shell page dashboard-page">
+    <div class="page-heading dashboard-heading">
+      <div><span class="eyebrow">Head engineer · Live site view</span><h1>Safety operations</h1><p>Live people, PPE, zone, equipment, and after-hours activity from the camera monitor.</p></div>
+      <div class="dashboard-actions"><span id="monitor-status" class="live-pill monitor-status">Starting camera…</span><button class="button secondary" id="enable-alerts" type="button">Enable browser alerts</button></div>
+    </div>
+
+    <div class="dashboard-kpis">
+      <article class="panel kpi"><span>Tracked people</span><strong id="kpi-people">—</strong><small>Current camera frame</small></article>
+      <article class="panel kpi"><span>People in zones</span><strong id="kpi-zones">—</strong><small>Tracked zone occupancy</small></article>
+      <article class="panel kpi"><span>PPE alerts</span><strong id="kpi-ppe">—</strong><small>Missing PPE assessments</small></article>
+      <article class="panel kpi"><span>Machinery</span><strong id="kpi-machinery">—</strong><small>Detections in current frame</small></article>
+    </div>
+
+    <div id="site-state" class="site-state">Site status will appear when the camera starts.</div>
+    <div id="after-hours-banner" class="after-hours-banner" hidden>AFTER-HOURS ALARM · A person is detected after the configured site closing time.</div>
+
+    <div class="dashboard-grid">
+      <section class="panel dashboard-feed-panel">
+        <div class="panel-head"><div><div class="panel-title">Live safety feed</div><div class="panel-kicker">Keep this dashboard open while the site is being monitored</div></div><span class="live-pill">Live</span></div>
+        <div class="dashboard-feed"><img src="{{ url_for('safety_monitor_video') }}" alt="Live camera with PPE and zone annotations"></div>
+        <div class="feed-note">One camera stream should be open at a time. The dashboard feed updates the live metrics and event lists here.</div>
+      </section>
+
+      <aside class="dashboard-side">
+        <section class="panel hours-panel">
+          <div class="panel-head"><div><div class="panel-title">Site closing time</div><div class="panel-kicker">Uses this computer’s local time, every day</div></div></div>
+          <form id="hours-form" class="hours-form">
+            <label class="field-label" for="closing-time">Close site at</label>
+            <div class="hours-row"><input id="closing-time" class="text-input" type="time"><button class="button" type="submit">Save</button></div>
+            <div id="hours-message" class="notice" role="status">No closing time set; after-hours alarms are off.</div>
+          </form>
+        </section>
+        <section class="panel classes-panel">
+          <div class="panel-head"><div><div class="panel-title">Current detections</div><div class="panel-kicker">Per-frame class counts</div></div></div>
+          <div id="class-counts" class="class-counts"><span>Waiting for camera frames…</span></div>
+        </section>
+        <section class="panel alert-panel">
+          <div class="panel-head"><div><div class="panel-title">Head engineer alerts</div><div class="panel-kicker">Zone PPE and after-hours alarms</div></div></div>
+          <div id="alert-feed" class="dashboard-events"><div class="empty-events">No alerts yet.</div></div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="panel occupants-panel">
+      <div class="panel-head"><div><div class="panel-title">People in configured zones</div><div class="panel-kicker">Live tracked ID, dwell time, and observed PPE assessment</div></div><span id="last-update" class="panel-kicker">Waiting for first frame</span></div>
+      <div class="table-scroll"><table class="occupants-table"><thead><tr><th>Zone</th><th>Track</th><th>Time in zone</th><th>PPE assessment</th><th>Person confidence</th></tr></thead><tbody id="occupants-body"><tr><td colspan="5" class="empty-cell">No live zone data yet.</td></tr></tbody></table></div>
+    </section>
+
+    <section class="panel activity-panel">
+      <div class="panel-head"><div><div class="panel-title">Recent site activity</div><div class="panel-kicker">Evidence-backed event history</div></div><a class="button secondary export-button" href="{{ url_for('safety_events_csv') }}">Download CSV</a></div>
+      <div id="activity-feed" class="dashboard-events activity-feed"><div class="empty-events">Waiting for events.</div></div>
+    </section>
+    <p class="analysis-note">Notifications are shown in this dashboard and, when enabled, as browser alerts with an audible alarm. The model’s “not detected / uncertain” result is not treated as confirmed PPE absence. Keep the dashboard open for live monitoring.</p>
+  </main>
+  <footer class="footer"><div class="shell">SafeSight · Local PPE and site activity dashboard · YOLO11s + ByteTrack</div></footer>
+
+  <script>
+    const monitorStatus = document.getElementById('monitor-status');
+    const alertFeed = document.getElementById('alert-feed');
+    const activityFeed = document.getElementById('activity-feed');
+    const occupantsBody = document.getElementById('occupants-body');
+    const countLabels = {
+      'hardhat':'Hardhat', 'machinery':'Machinery', 'mask':'Mask',
+      'no-hardhat':'No hardhat', 'no-mask':'No mask', 'no-safety vest':'No safety vest',
+      'person':'Person', 'safety cone':'Safety cone', 'safety vest':'Safety vest', 'vehicle':'Vehicle'
+    };
+    let initialized = false;
+    let lastSeenId = 0;
+    let audioContext = null;
+    let alertsEnabled = false;
+
+    function isAlert(event) {
+      return event.violation.startsWith('After-hours person detected') || event.violation.includes('PPE violation');
+    }
+
+    function playAlarm() {
+      if (!alertsEnabled || !audioContext) return;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, audioContext.currentTime);
+      oscillator.frequency.setValueAtTime(660, audioContext.currentTime + 0.18);
+      gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.18, audioContext.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.42);
+      oscillator.connect(gain); gain.connect(audioContext.destination);
+      oscillator.start(); oscillator.stop(audioContext.currentTime + 0.44);
+    }
+
+    function announce(event) {
+      playAlarm();
+      if (alertsEnabled && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('SafeSight safety alert', {body: `${event.zone_name} · Track #${event.track_id} · ${event.violation}`});
+      }
+    }
+
+    document.getElementById('enable-alerts').addEventListener('click', async (event) => {
+      if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission();
+      if (window.AudioContext || window.webkitAudioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        await audioContext.resume();
+      }
+      alertsEnabled = true;
+      event.currentTarget.textContent = 'Alerts enabled';
+      event.currentTarget.classList.add('alerts-enabled');
+    });
+
+    function renderCounts(counts) {
+      const container = document.getElementById('class-counts');
+      container.replaceChildren();
+      const items = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
+      if (!items.length) { container.innerHTML = '<span>No objects detected in this frame.</span>'; return; }
+      for (const [name, count] of items) {
+        const chip = document.createElement('div');
+        chip.className = 'class-count';
+        const label = document.createElement('span'); label.textContent = countLabels[name] || name;
+        const value = document.createElement('strong'); value.textContent = count;
+        chip.append(label, value); container.append(chip);
+      }
+    }
+
+    function renderOccupants(rows) {
+      occupantsBody.replaceChildren();
+      if (!rows || !rows.length) {
+        const tr = document.createElement('tr'); const td = document.createElement('td');
+        td.colSpan = 5; td.className = 'empty-cell'; td.textContent = 'No tracked people are currently inside a saved zone.';
+        tr.append(td); occupantsBody.append(tr); return;
+      }
+      for (const person of rows) {
+        const tr = document.createElement('tr');
+        const values = [person.zone, `#${person.track_id}`, `${person.dwell_seconds.toFixed(1)} sec`, `${person.ppe_summary} · ${person.ppe_status}`, `${(person.confidence * 100).toFixed(0)}%`];
+        values.forEach((value, index) => { const td = document.createElement('td'); td.textContent = value; if (index === 3 && person.ppe_summary.includes('violation')) td.className = 'ppe-missing'; tr.append(td); });
+        occupantsBody.append(tr);
+      }
+    }
+
+    function eventCard(event, compact = false) {
+      const card = document.createElement('article'); card.className = 'dashboard-event';
+      const image = document.createElement('img'); image.src = `/static/evidence/${encodeURIComponent(event.evidence_file)}`; image.alt = 'Saved alert evidence';
+      const detail = document.createElement('div'); detail.className = 'dashboard-event-copy';
+      const title = document.createElement('strong'); title.textContent = event.violation;
+      const meta = document.createElement('span'); meta.textContent = `${event.zone_name} · Track #${event.track_id}`;
+      const status = document.createElement('span'); status.textContent = event.ppe_status || 'PPE status unavailable';
+      const time = document.createElement('time'); time.textContent = new Date(event.occurred_at).toLocaleString();
+      detail.append(title, meta, status, time); card.append(image, detail);
+      if (compact) card.classList.add('compact-event');
+      return card;
+    }
+
+    function renderEvents(events) {
+      const alerts = events.filter(isAlert).slice(0, 8);
+      alertFeed.replaceChildren(); activityFeed.replaceChildren();
+      if (!alerts.length) { const empty = document.createElement('div'); empty.className = 'empty-events'; empty.textContent = 'No PPE or after-hours alerts yet.'; alertFeed.append(empty); }
+      else alerts.forEach((item) => alertFeed.append(eventCard(item, true)));
+      if (!events.length) { const empty = document.createElement('div'); empty.className = 'empty-events'; empty.textContent = 'Waiting for events.'; activityFeed.append(empty); }
+      else events.slice(0, 12).forEach((item) => activityFeed.append(eventCard(item)));
+
+      const newestId = events.reduce((max, item) => Math.max(max, Number(item.id)), 0);
+      if (initialized) {
+        events.filter((item) => Number(item.id) > lastSeenId && isAlert(item)).reverse().forEach(announce);
+      } else initialized = true;
+      lastSeenId = Math.max(lastSeenId, newestId);
+    }
+
+    async function loadSettings() {
+      const response = await fetch('/api/settings');
+      const settings = await response.json();
+      document.getElementById('closing-time').value = settings.closing_time || '';
+      document.getElementById('hours-message').textContent = settings.closing_time
+        ? `After-hours alarms are active from ${settings.closing_time} (local time).`
+        : 'No closing time set; after-hours alarms are off.';
+    }
+
+    document.getElementById('hours-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({closing_time:document.getElementById('closing-time').value})});
+      const result = await response.json();
+      document.getElementById('hours-message').textContent = response.ok
+        ? (result.closing_time ? `After-hours alarms are active from ${result.closing_time} (local time).` : 'No closing time set; after-hours alarms are off.')
+        : (result.error || 'Could not save the closing time.');
+    });
+
+    async function refreshDashboard() {
+      try {
+        const response = await fetch('/api/dashboard', {cache:'no-store'});
+        if (!response.ok) throw new Error('Dashboard API is unavailable.');
+        const data = await response.json(); const snapshot = data.snapshot || {};
+        document.getElementById('kpi-people').textContent = snapshot.tracked_people ?? '—';
+        document.getElementById('kpi-zones').textContent = snapshot.zone_people?.length ?? '—';
+        document.getElementById('kpi-ppe').textContent = snapshot.ppe_alert_count ?? '—';
+        document.getElementById('kpi-machinery').textContent = snapshot.machinery_count ?? '—';
+        document.getElementById('after-hours-banner').hidden = !(snapshot.site_closed && snapshot.after_hours_people > 0);
+        const siteState = document.getElementById('site-state');
+        siteState.textContent = snapshot.site_closed ? `SITE CLOSED · Monitoring for remaining workers${snapshot.closing_time ? ` · closed at ${snapshot.closing_time}` : ''}` : 'SITE OPEN · Normal monitoring';
+        siteState.classList.toggle('site-state-closed', Boolean(snapshot.site_closed));
+        renderCounts(snapshot.class_counts); renderOccupants(snapshot.zone_people); renderEvents(data.events || []);
+        if (snapshot.updated_at) {
+          const updated = new Date(snapshot.updated_at);
+          document.getElementById('last-update').textContent = `Frame updated ${updated.toLocaleTimeString()}`;
+          monitorStatus.textContent = (Date.now() - updated.getTime() < 5000) ? 'Camera active' : 'Waiting for camera frames';
+          monitorStatus.classList.toggle('monitor-offline', Date.now() - updated.getTime() >= 5000);
+        } else { monitorStatus.textContent = 'Waiting for camera frames'; monitorStatus.classList.add('monitor-offline'); }
+      } catch (error) { monitorStatus.textContent = 'Monitor unavailable'; monitorStatus.classList.add('monitor-offline'); }
+    }
+
+    loadSettings().catch(() => {});
+    refreshDashboard();
+    window.setInterval(refreshDashboard, 1000);
+  </script>
+</body>
+</html>

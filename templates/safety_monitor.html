@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b1013">
+  <title>Safety monitor | SafeSight</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <div class="topbar">
+    <nav class="shell nav" aria-label="Main navigation">
+      <a class="brand" href="{{ url_for('home') }}"><span class="brand-mark">S</span> SafeSight <span style="color:var(--muted);font-weight:500">/ Zone monitor</span></a>
+      <div class="nav-links">
+        <a href="{{ url_for('home') }}">Overview</a>
+        <a href="{{ url_for('front') }}">Image &amp; video</a>
+        <a href="{{ url_for('webcam') }}">Live camera</a>
+        <a class="active" href="{{ url_for('safety_monitor_page') }}">Safety monitor</a>
+        <a href="{{ url_for('safety_dashboard') }}">Live dashboard</a>
+      </div>
+    </nav>
+  </div>
+
+  <main class="shell page safety-page">
+    <div class="page-heading">
+      <span class="eyebrow">Track · Detect · Review</span>
+      <h1>Zone-based safety monitor</h1>
+      <p>Draw work zones over the live camera, track people in each zone, and save evidence when a person remains there for 1.5 seconds or a PPE violation persists.</p>
+    </div>
+
+    <div class="monitor-grid">
+      <section class="panel monitor-feed-panel">
+        <div class="panel-head">
+          <div><div class="panel-title">Live tracked feed</div><div class="panel-kicker">Click the image to add polygon corners</div></div>
+          <span class="live-pill">Local camera</span>
+        </div>
+        <div class="monitor-stage" id="monitor-stage">
+          <img id="monitor-feed" src="{{ url_for('safety_monitor_video') }}" alt="Live camera with tracked people and zone alerts">
+          <canvas id="zone-canvas" aria-label="Click to draw a zone polygon"></canvas>
+        </div>
+        <div class="feed-note">Person IDs come from ByteTrack. Event evidence is saved locally under <code>static/evidence</code>.</div>
+      </section>
+
+      <aside class="panel zone-panel">
+        <div class="panel-head"><div><div class="panel-title">Zone rules</div><div class="panel-kicker">A person is counted when their lower body enters the zone.</div></div></div>
+        <div class="zone-controls">
+          <label class="field-label" for="zone-name">Zone name</label>
+          <input class="text-input" id="zone-name" maxlength="40" placeholder="e.g. Loading area">
+          <span class="field-label">Required PPE</span>
+          <label class="check-row"><input type="checkbox" name="required" value="Hardhat" checked> Hardhat</label>
+          <label class="check-row"><input type="checkbox" name="required" value="Mask"> Mask</label>
+          <label class="check-row"><input type="checkbox" name="required" value="Safety Vest" checked> Safety vest</label>
+          <div class="zone-actions">
+            <button class="button full" id="save-zone" type="button">Save drawn zone</button>
+            <button class="button secondary full" id="clear-draft" type="button">Clear drawing</button>
+          </div>
+          <div class="notice" id="zone-message" role="status">Add at least three corners on the camera image.</div>
+          <div class="zone-list-wrap"><div class="list-heading">Configured zones</div><div id="zone-list" class="zone-list"></div></div>
+        </div>
+      </aside>
+    </div>
+
+    <section class="panel timeline-panel">
+      <div class="panel-head timeline-head">
+        <div><div class="panel-title">Safety event timeline</div><div class="panel-kicker">Each entry includes the tracked person and the observed status of every required PPE item.</div></div>
+        <a class="button secondary export-button" href="{{ url_for('safety_events_csv') }}">Download CSV</a>
+      </div>
+      <p class="analysis-note timeline-note">PPE status is assigned to a tracked person using the detected PPE box position within their person box. “Not detected / uncertain” means the model did not provide enough visual evidence; it does not mean the item is missing.</p>
+      <div id="event-list" class="event-list" aria-live="polite"><div class="empty-events">Waiting for a person to remain in a saved zone.</div></div>
+    </section>
+  </main>
+  <footer class="footer"><div class="shell">SafeSight · YOLO11s + ByteTrack · Local safety monitoring demo</div></footer>
+
+  <script>
+    const canvas = document.getElementById('zone-canvas');
+    const ctx = canvas.getContext('2d');
+    const stage = document.getElementById('monitor-stage');
+    const draft = [];
+    let savedZones = [];
+    const colors = ['#b7f36b', '#7ce0cb', '#ffc76b', '#c2a2ff', '#ff9b8e'];
+
+    function resizeCanvas() {
+      const rect = stage.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * ratio);
+      canvas.height = Math.round(rect.height * ratio);
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      drawZones();
+    }
+
+    function drawPolygon(points, color, label, close = true) {
+      if (!points.length) return;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x * w, points[0].y * h);
+      for (const point of points.slice(1)) ctx.lineTo(point.x * w, point.y * h);
+      if (close && points.length > 2) ctx.closePath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.fillStyle = `${color}22`;
+      if (close && points.length > 2) ctx.fill();
+      ctx.stroke();
+      for (const point of points) {
+        ctx.beginPath();
+        ctx.arc(point.x * w, point.y * h, 5, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+      if (label) {
+        ctx.font = '600 13px Segoe UI, Arial';
+        ctx.fillStyle = color;
+        ctx.fillText(label, points[0].x * w + 8, Math.max(18, points[0].y * h - 8));
+      }
+    }
+
+    function drawZones() {
+      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+      savedZones.forEach((zone, index) => drawPolygon(zone.points, colors[index % colors.length], zone.name));
+      drawPolygon(draft, '#ffffff', draft.length ? `New zone (${draft.length} points)` : '', false);
+    }
+
+    function renderZones() {
+      const list = document.getElementById('zone-list');
+      list.replaceChildren();
+      if (!savedZones.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-events';
+        empty.textContent = 'No zones saved yet.';
+        list.append(empty);
+        return;
+      }
+      savedZones.forEach((zone, index) => {
+        const row = document.createElement('div');
+        row.className = 'zone-row';
+        const copy = document.createElement('div');
+        const name = document.createElement('strong');
+        name.textContent = zone.name;
+        const rules = document.createElement('span');
+        rules.textContent = zone.required.join(' · ');
+        copy.append(name, rules);
+        const remove = document.createElement('button');
+        remove.className = 'remove-zone';
+        remove.type = 'button';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', async () => {
+          await fetch(`/api/zones/${encodeURIComponent(zone.id)}`, {method: 'DELETE'});
+          await loadZones();
+        });
+        row.style.setProperty('--zone-color', colors[index % colors.length]);
+        row.append(copy, remove);
+        list.append(row);
+      });
+    }
+
+    async function loadZones() {
+      const response = await fetch('/api/zones');
+      if (!response.ok) throw new Error(await response.text());
+      savedZones = await response.json();
+      drawZones();
+      renderZones();
+    }
+
+    canvas.addEventListener('click', (event) => {
+      const rect = canvas.getBoundingClientRect();
+      draft.push({
+        x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+        y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+      });
+      drawZones();
+      document.getElementById('zone-message').textContent = `${draft.length} corner(s) added. Add at least three, then save.`;
+    });
+
+    document.getElementById('clear-draft').addEventListener('click', () => {
+      draft.length = 0;
+      drawZones();
+      document.getElementById('zone-message').textContent = 'Drawing cleared. Add at least three corners.';
+    });
+
+    document.getElementById('save-zone').addEventListener('click', async () => {
+      const message = document.getElementById('zone-message');
+      const required = [...document.querySelectorAll('input[name="required"]:checked')].map((item) => item.value);
+      try {
+        const response = await fetch('/api/zones', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            name: document.getElementById('zone-name').value,
+            points: draft,
+            required,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || 'Could not save zone.');
+        draft.length = 0;
+        document.getElementById('zone-name').value = '';
+        await loadZones();
+        message.textContent = `Saved zone “${payload.name}”.`;
+      } catch (error) {
+        message.textContent = error.message;
+      }
+    });
+
+    function renderEvents(events) {
+      const list = document.getElementById('event-list');
+      list.replaceChildren();
+      if (!events.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-events';
+        empty.textContent = 'Waiting for a person to remain in a saved zone.';
+        list.append(empty);
+        return;
+      }
+      for (const event of events) {
+        const card = document.createElement('article');
+        card.className = 'event-card';
+        const image = document.createElement('img');
+        image.src = `/static/evidence/${encodeURIComponent(event.evidence_file)}`;
+        image.alt = `Evidence for ${event.violation}`;
+        const details = document.createElement('div');
+        details.className = 'event-details';
+        const title = document.createElement('strong');
+        title.textContent = event.violation;
+        if (event.violation.includes('PPE complete')) title.classList.add('event-ok');
+        if (event.violation.includes('uncertain')) title.classList.add('event-uncertain');
+        const meta = document.createElement('span');
+        meta.textContent = `${event.zone_name} · Track #${event.track_id} · ${(event.confidence * 100).toFixed(0)}% confidence`;
+        const ppe = document.createElement('span');
+        ppe.className = 'event-ppe-status';
+        ppe.textContent = event.ppe_status || 'PPE status unavailable for this older event';
+        const time = document.createElement('time');
+        time.textContent = new Date(event.occurred_at).toLocaleString();
+        details.append(title, meta, ppe, time);
+        card.append(image, details);
+        list.append(card);
+      }
+    }
+
+    async function refreshEvents() {
+      try {
+        const response = await fetch('/api/events');
+        if (response.ok) renderEvents(await response.json());
+      } catch (_) { /* Keep the monitor visible if the event poll briefly fails. */ }
+    }
+
+    new ResizeObserver(resizeCanvas).observe(stage);
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    loadZones().catch((error) => { document.getElementById('zone-message').textContent = error.message; });
+    refreshEvents();
+    window.setInterval(refreshEvents, 2500);
+  </script>
+</body>
+</html>
