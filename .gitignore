@@ -6,6 +6,7 @@ __pycache__/
 .env.*
 !.env.example
 AppData/
+Docs_new/
 safety_data/
 static/evidence/
 Videos/
