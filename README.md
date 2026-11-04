@@ -1,7 +1,7 @@
 # SafeSight
 ### Key tasks performed by the project
 
-- **Detects** people, PPE items (hardhats, masks, safety vests), and machinery in images and video using the trained YOLO11 model.
+- **Detects** people, PPE items (hardhats, masks, safety vests), and machinery in images and video using the trained YOLO26 model.
 - **Tracks people** across video frames so the system can follow their movement.
 - **Checks zones** configured on the camera view and records when tracked people enter or remain in them.
 - **Assesses PPE** for tracked people and flags detected missing PPE, with uncertain detections treated cautiously.
